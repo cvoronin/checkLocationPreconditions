@@ -3,6 +3,8 @@ package ru.cvoronin.checkgeoprerequests
 import android.Manifest
 import android.app.Dialog
 import android.content.Context
+import android.content.DialogInterface
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.support.v4.app.ActivityCompat
@@ -13,17 +15,25 @@ import android.support.v7.app.AppCompatActivity
 import android.util.Log
 import android.widget.Toast
 import com.afollestad.materialdialogs.MaterialDialog
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 
-class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRationaleDialogListener {
+class MainActivity : AppCompatActivity(),
+        PermissionDialogFragment.PermissionRationaleDialogListener,
+        HandleGooglePlayServicesErrorDialog.GooglePlayServicesResolutionDialogListener {
 
     companion object {
+        var TAG = "MainActivity"
+        val LOCATION_PERMISSION_RATIONALE = "Location permission is... "
+
         val KEY_STATE_RATIONALE_DIALOG_ACTIVE = "isRationaleDialogActive"
         val KEY_IS_PERMISSION_GRANTED = "isPermissionGranted"
         val KEY_IS_PERMISSION_REQUEST_ACTIVE = "isPermissionRequestActive"
+        val KEY_GOOGLE_PLAY_SERVICES_READY = "isGooglePlayServicesReady"
+        val KEY_GOOGLE_PLAY_SERVICES_RESOLVING = "isGooglePlayServicesResolving"
 
-        var TAG = "MainActivity"
         val REQ_PERMISSION_LOCATION = 100
-        val LOCATION_PERMISSION_RATIONALE = "Location permission is... "
+        val REQ_GOOGLE_PLAY_SERVICES_RESOLVE = 101
     }
 
     //............................................................................................
@@ -33,9 +43,14 @@ class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRat
         setContentView(R.layout.activity_main)
 
         if (savedInstanceState != null) {
-            isRationaleDialogActive = savedInstanceState.getBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE)
-            isPermissionGranted = savedInstanceState.getBoolean(KEY_IS_PERMISSION_GRANTED)
-            isPermissionRequestActive = savedInstanceState.getBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE)
+            with(savedInstanceState) {
+                isRationaleDialogActive = getBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE)
+                isPermissionGranted = getBoolean(KEY_IS_PERMISSION_GRANTED)
+                isPermissionRequestActive = getBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE)
+
+                isGooglePlayServicesReady = getBoolean(KEY_GOOGLE_PLAY_SERVICES_READY)
+                isGooglePlayServicesResolutionInProgress = getBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING)
+            }
         }
     }
 
@@ -61,8 +76,22 @@ class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRat
                 return
             }
 
-            true -> {}
+            true -> {
+            }
         }
+
+        /* OK, Permission is granted, check Google Play Services version */
+
+        if (isGooglePlayServicesResolutionInProgress) {
+            // Resolution in progress, do not touch it
+            return
+        }
+
+        if (isGooglePlayServicesReady == null) {
+            doCheckGooglePlayServices()
+        }
+
+
     }
 
     override fun onPause() {
@@ -74,27 +103,36 @@ class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRat
         super.onSaveInstanceState(outState)
         with(outState!!) {
 
-            if (isPermissionGranted != null) {
-                outState.putBoolean(KEY_IS_PERMISSION_GRANTED, isPermissionGranted!!)
+            if (isPermissionGranted != null) putBoolean(KEY_IS_PERMISSION_GRANTED, isPermissionGranted!!)
+
+            putBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE, isRationaleDialogActive)
+            putBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE, isPermissionRequestActive)
+
+            if (isGooglePlayServicesReady != null) {
+                putBoolean(KEY_GOOGLE_PLAY_SERVICES_READY, isGooglePlayServicesReady!!)
             }
 
-            outState.putBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE, isRationaleDialogActive)
-            outState.putBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE, isPermissionRequestActive)
+            putBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING, isGooglePlayServicesResolutionInProgress)
         }
     }
 
-    //.............................................................................................
+    //... CHECK LOCATION PERMISSION SECTION .......................................................
 
+    // Until check is completed value is nor true, nor false
     private var isPermissionGranted: Boolean? = null
+
     private var isRationaleDialogActive: Boolean = false
-    private var isPermissionRequestActive : Boolean = false
+    private var isPermissionRequestActive: Boolean = false
 
     private fun doCheckPermissions() {
-        val isGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val isGranted = ContextCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
         when (isGranted) {
             true -> onPermissionsGranted()
             else -> {
-                val shouldShowRationale = ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                val shouldShowRationale = ActivityCompat.shouldShowRequestPermissionRationale(this,
+                        Manifest.permission.ACCESS_FINE_LOCATION)
                 when (shouldShowRationale) {
                     true -> doShowPermissionRationale()
                     else -> doRequestPermission()
@@ -131,6 +169,8 @@ class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRat
         Log.d(TAG, "... onPermissionsGranted")
         Toast.makeText(this, "PERMISSION GRANTED", Toast.LENGTH_SHORT).show()
         isPermissionGranted = true
+
+        doCheckGooglePlayServices()
     }
 
     private fun onPermissionsRejected() {
@@ -153,9 +193,74 @@ class MainActivity : AppCompatActivity(), PermissionDialogFragment.PermissionRat
             }
         }
     }
+
+    //... CHECK GOOGLE PLAY SERVICES SECTION ......................................................
+
+
+    private var isGooglePlayServicesReady: Boolean? = null
+    private var isGooglePlayServicesResolutionInProgress = false
+
+    fun doCheckGooglePlayServices() {
+        Log.d(TAG, "... doCheckGooglePlayServices")
+
+        if (isGooglePlayServicesResolutionInProgress) {
+            Log.d(TAG, "... ... resolution is in progress, do nothing")
+            return
+        }
+
+        val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
+        when (checkResult) {
+            ConnectionResult.SUCCESS -> {
+                onGooglePlayServicesCheckSuccess()
+            }
+
+            else -> {
+                isGooglePlayServicesResolutionInProgress = true
+                HandleGooglePlayServicesErrorDialog.show(supportFragmentManager, checkResult, REQ_GOOGLE_PLAY_SERVICES_RESOLVE)
+            }
+        }
+    }
+
+    private fun onGooglePlayServicesCheckSuccess() {
+        Log.d(TAG, "... onGooglePlayServicesCheckSuccess")
+        isGooglePlayServicesReady = true
+        isGooglePlayServicesResolutionInProgress = false
+    }
+
+    private fun onGooglePlayServicesCheckFail() {
+        Log.d(TAG, "... onGooglePlayServicesCheckFail")
+        isGooglePlayServicesReady = false
+        isGooglePlayServicesResolutionInProgress = false
+    }
+
+    override fun onGooglePlayServicesResolutionDialogDismissed() {
+        Log.d(TAG, "... onResolutionDialogDismissed")
+
+        isGooglePlayServicesResolutionInProgress = false
+
+        // Check if problem was fixed
+        val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
+        when (checkResult) {
+            ConnectionResult.SUCCESS -> onGooglePlayServicesCheckSuccess()
+            else -> onGooglePlayServicesCheckFail()
+        }
+    }
+
+    //.............................................................................................
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        Log.d(TAG, "... onActivityResult")
+
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQ_GOOGLE_PLAY_SERVICES_RESOLVE) {
+            onGooglePlayServicesResolutionDialogDismissed()
+            return
+        }
+    }
 }
 
-//................................................................................................
+//.................................................................................................
 
 class PermissionDialogFragment : DialogFragment() {
 
@@ -164,11 +269,12 @@ class PermissionDialogFragment : DialogFragment() {
         val TAG = "PermissionRationaleDialog"
 
         fun show(fragmentManager: FragmentManager, message: String) {
-            val args = Bundle()
-            args.putString(KEY_MESSAGE, message)
-
             val fragment = PermissionDialogFragment()
-            fragment.arguments = args
+
+            fragment.arguments = Bundle().apply {
+                putString(KEY_MESSAGE, message)
+            }
+
             fragment.show(fragmentManager, TAG)
         }
     }
@@ -200,4 +306,47 @@ class PermissionDialogFragment : DialogFragment() {
     }
 }
 
-//................................................................................................
+//.................................................................................................
+
+class HandleGooglePlayServicesErrorDialog : DialogFragment() {
+
+    interface GooglePlayServicesResolutionDialogListener {
+        fun onGooglePlayServicesResolutionDialogDismissed()
+    }
+
+    companion object {
+        val TAG = "ServicesResolutionDialog"
+        val KEY_ERROR_CODE = "errorCode"
+        val KEY_REQ_CODE = "requestCode"
+
+        fun show(fragmentManager: FragmentManager, errorCode: Int, requestCode: Int) {
+            val fragment = HandleGooglePlayServicesErrorDialog()
+
+            fragment.arguments = Bundle().apply {
+                putInt(KEY_ERROR_CODE, errorCode)
+                putInt(KEY_REQ_CODE, requestCode)
+            }
+
+            fragment.show(fragmentManager, TAG)
+        }
+    }
+
+    lateinit private var listener: GooglePlayServicesResolutionDialogListener
+
+    override fun onAttach(context: Context?) {
+        super.onAttach(context)
+        listener = activity as GooglePlayServicesResolutionDialogListener
+    }
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val errorCode = arguments.getInt(KEY_ERROR_CODE)
+        val requestCode = arguments.getInt(KEY_REQ_CODE)
+
+        return GoogleApiAvailability.getInstance().getErrorDialog(activity, errorCode, requestCode)
+    }
+
+    override fun onDismiss(dialog: DialogInterface?) {
+        listener.onGooglePlayServicesResolutionDialogDismissed()
+    }
+}
+
