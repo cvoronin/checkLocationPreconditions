@@ -26,9 +26,9 @@ class MainActivity : AppCompatActivity(),
         var TAG = "MainActivity"
         val LOCATION_PERMISSION_RATIONALE = "Location permission is... "
 
-        val KEY_STATE_RATIONALE_DIALOG_ACTIVE = "isRationaleDialogActive"
         val KEY_IS_PERMISSION_GRANTED = "isPermissionGranted"
-        val KEY_IS_PERMISSION_REQUEST_ACTIVE = "isPermissionRequestActive"
+        val KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE = "isPermissionRequestDialogActive"
+
         val KEY_GOOGLE_PLAY_SERVICES_READY = "isGooglePlayServicesReady"
         val KEY_GOOGLE_PLAY_SERVICES_RESOLVING = "isGooglePlayServicesResolving"
 
@@ -44,9 +44,8 @@ class MainActivity : AppCompatActivity(),
 
         if (savedInstanceState != null) {
             with(savedInstanceState) {
-                isRationaleDialogActive = getBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE)
                 isPermissionGranted = getBoolean(KEY_IS_PERMISSION_GRANTED)
-                isPermissionRequestActive = getBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE)
+                isPermissionRequestDialogActive = getBoolean(KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE)
 
                 isGooglePlayServicesReady = getBoolean(KEY_GOOGLE_PLAY_SERVICES_READY)
                 isGooglePlayServicesResolutionInProgress = getBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING)
@@ -59,8 +58,7 @@ class MainActivity : AppCompatActivity(),
         super.onResume()
 
         /* Check if permission is granted or if request permission dialog is active */
-        if (isRationaleDialogActive || isPermissionRequestActive) {
-
+        if (isPermissionRequestDialogActive) {
             // Dialog is active, do nothing, waiting for result
             return
         }
@@ -105,8 +103,7 @@ class MainActivity : AppCompatActivity(),
 
             if (isPermissionGranted != null) putBoolean(KEY_IS_PERMISSION_GRANTED, isPermissionGranted!!)
 
-            putBoolean(KEY_STATE_RATIONALE_DIALOG_ACTIVE, isRationaleDialogActive)
-            putBoolean(KEY_IS_PERMISSION_REQUEST_ACTIVE, isPermissionRequestActive)
+            putBoolean(KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE, isPermissionRequestDialogActive)
 
             if (isGooglePlayServicesReady != null) {
                 putBoolean(KEY_GOOGLE_PLAY_SERVICES_READY, isGooglePlayServicesReady!!)
@@ -120,9 +117,7 @@ class MainActivity : AppCompatActivity(),
 
     // Until check is completed value is nor true, nor false
     private var isPermissionGranted: Boolean? = null
-
-    private var isRationaleDialogActive: Boolean = false
-    private var isPermissionRequestActive: Boolean = false
+    private var isPermissionRequestDialogActive: Boolean = false
 
     private fun doCheckPermissions() {
         val isGranted = ContextCompat.checkSelfPermission(this,
@@ -143,25 +138,25 @@ class MainActivity : AppCompatActivity(),
 
     private fun doShowPermissionRationale() {
         Log.d(TAG, "... doShowPermissionRationale")
-        isRationaleDialogActive = true
+        isPermissionRequestDialogActive = true
         PermissionDialogFragment.show(supportFragmentManager, LOCATION_PERMISSION_RATIONALE)
     }
 
     override fun onRationaleAccepted() {
         Log.d(TAG, "... onRationaleAccepted")
-        isRationaleDialogActive = false
+        isPermissionRequestDialogActive = false
         doRequestPermission()
     }
 
     override fun onRationaleRejected() {
         Log.d(TAG, "... onRationaleRejected")
-        isRationaleDialogActive = false
+        isPermissionRequestDialogActive = false
         onPermissionsRejected()
     }
 
     private fun doRequestPermission() {
         Log.d(TAG, "... doRequestPermission")
-        isPermissionRequestActive = true
+        isPermissionRequestDialogActive = true
         requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_PERMISSION_LOCATION)
     }
 
@@ -185,7 +180,7 @@ class MainActivity : AppCompatActivity(),
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == REQ_PERMISSION_LOCATION) {
-            isPermissionRequestActive = false
+            isPermissionRequestDialogActive = false
 
             when (permissions.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 true -> onPermissionsGranted()
