@@ -17,6 +17,11 @@ import android.widget.Toast
 import com.afollestad.materialdialogs.MaterialDialog
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
+import com.google.android.gms.common.api.GoogleApiClient
+import com.google.android.gms.common.api.PendingResult
+import com.google.android.gms.location.*
+import org.jetbrains.anko.doAsync
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         PermissionDialogFragment.PermissionRationaleDialogListener,
@@ -36,7 +41,7 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         val REQ_GOOGLE_PLAY_SERVICES_RESOLVE = 101
     }
 
-    lateinit var locationPreconditionsChecker : LocationPreconditionsChecker
+//    lateinit var locationPreconditionsChecker : LocationPreconditionsChecker
 
     //............................................................................................
 
@@ -54,14 +59,14 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
             }
         }
 
-        locationPreconditionsChecker = LocationPreconditionsCheckerImpl(this, savedInstanceState)
+//        locationPreconditionsChecker = LocationPreconditionsCheckerImpl(this, savedInstanceState)
     }
 
     override fun onResume() {
         Log.d(TAG, "... onResume")
         super.onResume()
 
-        locationPreconditionsChecker.check()
+//        locationPreconditionsChecker.check()
 
         /* Check if permission is granted or if request permission dialog is active */
         if (isPermissionRequestDialogActive || isGooglePlayServicesResolutionInProgress) {
@@ -86,7 +91,7 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
 
         /* OK, Permission is granted, check Google Play Services version */
 
-         if (isGooglePlayServicesReady == null) {
+        if (isGooglePlayServicesReady == null) {
             doCheckGooglePlayServices()
         }
 
@@ -167,12 +172,12 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         when (isAccepted) {
             true -> {
                 doRequestPermission() //XXX REMOVE
-                locationPreconditionsChecker.onRationaleResult(true)
+//                locationPreconditionsChecker.onRationaleResult(true)
             }
 
             false -> {
                 onPermissionsRejected() //XXX REMOVE
-                locationPreconditionsChecker.onRationaleResult(false)
+//                locationPreconditionsChecker.onRationaleResult(false)
             }
         }
     }
@@ -242,9 +247,12 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
                 }
             }
 
-            false -> { onGooglePlayServicesCheckFail() }
+            false -> {
+                onGooglePlayServicesCheckFail()
+            }
 
-            true -> {}
+            true -> {
+            }
         }
     }
 
@@ -252,6 +260,8 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         Log.d(TAG, "... onGooglePlayServicesCheckSuccess")
         isGooglePlayServicesReady = true
         isGooglePlayServicesResolutionInProgress = false
+
+        initGoogleApiClient()
     }
 
     private fun onGooglePlayServicesCheckFail() {
@@ -285,7 +295,60 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
             return
         }
     }
+
+    //.............................................................................................
+
+    //... ИНИЦИАЛИЗАЦИЯ КЛИЕНТА ...................................................................
+
+    private lateinit var apiClient: GoogleApiClient
+
+    private val connectionCallbacks = object : GoogleApiClient.ConnectionCallbacks {
+        override fun onConnected(p0: Bundle?) {
+            Log.d(TAG, "... onConnected")
+        }
+
+        override fun onConnectionSuspended(p0: Int) {
+            Log.d(TAG, "... onConnectionSuspended")
+        }
+    }
+
+    private val connectionFailedListener = GoogleApiClient.OnConnectionFailedListener { Log.d(TAG, "!!! onConnectionFailed") }
+
+    private fun createLocationRequest() = LocationRequest().apply {
+        interval = 2000
+        fastestInterval = 1000
+        priority = LocationRequest.PRIORITY_HIGH_ACCURACY
+    }
+
+    private fun initGoogleApiClient() {
+        Log.d(TAG, "... initGoogleApiClient")
+
+        apiClient = GoogleApiClient.Builder(this)
+                .addApi(LocationServices.API)
+                .addConnectionCallbacks(connectionCallbacks)
+                .addOnConnectionFailedListener(connectionFailedListener)
+                .build()
+
+        val builder = LocationSettingsRequest.Builder().addLocationRequest(createLocationRequest())
+
+        val resultPending: PendingResult<LocationSettingsResult> =
+                LocationServices.SettingsApi.checkLocationSettings(apiClient, builder.build())
+
+        resultPending.setResultCallback { result ->
+
+            Log.d(TAG, "... onResultCallback")
+
+            val status = result.status
+            val states : LocationSettingsStates = result.locationSettingsStates
+
+            Log.d(TAG, "... ... status $status")
+
+        }
+
+        apiClient.connect()
+    }
 }
+
 
 //.................................................................................................
 
@@ -307,7 +370,7 @@ class PermissionDialogFragment : DialogFragment() {
     }
 
     interface PermissionRationaleDialogListener {
-        fun onRationaleResult(isAccepted : Boolean)
+        fun onRationaleResult(isAccepted: Boolean)
     }
 
     lateinit var listener: PermissionRationaleDialogListener

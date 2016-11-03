@@ -19,3 +19,5 @@
 
 -dontobfuscate
 -keep class ru.cvoronin.checkgeoprerequests.** { *; }
+
+-dontwarn org.jetbrains.anko.internals.AnkoInternals
