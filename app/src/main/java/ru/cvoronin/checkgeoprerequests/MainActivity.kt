@@ -18,7 +18,7 @@ import com.afollestad.materialdialogs.MaterialDialog
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 
-class MainActivity : AppCompatActivity(),
+class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         PermissionDialogFragment.PermissionRationaleDialogListener,
         HandleGooglePlayServicesErrorDialog.GooglePlayServicesResolutionDialogListener {
 
@@ -36,6 +36,8 @@ class MainActivity : AppCompatActivity(),
         val REQ_GOOGLE_PLAY_SERVICES_RESOLVE = 101
     }
 
+    lateinit var locationPreconditionsChecker : LocationPreconditionsChecker
+
     //............................................................................................
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,14 +53,18 @@ class MainActivity : AppCompatActivity(),
                 isGooglePlayServicesResolutionInProgress = getBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING)
             }
         }
+
+        locationPreconditionsChecker = LocationPreconditionsCheckerImpl(this, savedInstanceState)
     }
 
     override fun onResume() {
         Log.d(TAG, "... onResume")
         super.onResume()
 
+        locationPreconditionsChecker.check()
+
         /* Check if permission is granted or if request permission dialog is active */
-        if (isPermissionRequestDialogActive) {
+        if (isPermissionRequestDialogActive || isGooglePlayServicesResolutionInProgress) {
             // Dialog is active, do nothing, waiting for result
             return
         }
@@ -80,12 +86,7 @@ class MainActivity : AppCompatActivity(),
 
         /* OK, Permission is granted, check Google Play Services version */
 
-        if (isGooglePlayServicesResolutionInProgress) {
-            // Resolution in progress, do not touch it
-            return
-        }
-
-        if (isGooglePlayServicesReady == null) {
+         if (isGooglePlayServicesReady == null) {
             doCheckGooglePlayServices()
         }
 
@@ -113,6 +114,26 @@ class MainActivity : AppCompatActivity(),
         }
     }
 
+    //.............................................................................................
+
+    override fun onLocationPreconditionsCheckCompleted(checkResult: LocationPreconditionsChecker.CheckResult) {
+
+    }
+
+    //... Методы быстрой проверки .................................................................
+
+    /*
+        Иногда достаточно только их - в случаях, когда не требуется
+        выполнять полный анализ, запрос разрешений, обновление устаревших версий и т. п. -
+        когда возможность получить текущие координаты либо есть, либо нет.
+     */
+
+    fun isGeoLocationPermissionGranted(): Boolean = ContextCompat.checkSelfPermission(this,
+            Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    fun isGooglePlayServicesAvailable(): Boolean =
+            GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) == ConnectionResult.SUCCESS
+
     //... CHECK LOCATION PERMISSION SECTION .......................................................
 
     // Until check is completed value is nor true, nor false
@@ -120,10 +141,7 @@ class MainActivity : AppCompatActivity(),
     private var isPermissionRequestDialogActive: Boolean = false
 
     private fun doCheckPermissions() {
-        val isGranted = ContextCompat.checkSelfPermission(this,
-                Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-        when (isGranted) {
+        when (isGeoLocationPermissionGranted()) {
             true -> onPermissionsGranted()
             else -> {
                 val shouldShowRationale = ActivityCompat.shouldShowRequestPermissionRationale(this,
@@ -136,25 +154,30 @@ class MainActivity : AppCompatActivity(),
         }
     }
 
-    private fun doShowPermissionRationale() {
+    override fun doShowPermissionRationale() {
         Log.d(TAG, "... doShowPermissionRationale")
         isPermissionRequestDialogActive = true
         PermissionDialogFragment.show(supportFragmentManager, LOCATION_PERMISSION_RATIONALE)
     }
 
-    override fun onRationaleAccepted() {
-        Log.d(TAG, "... onRationaleAccepted")
+    override fun onRationaleResult(isAccepted: Boolean) {
+        Log.d(TAG, "... onRationaleResult: $isAccepted")
         isPermissionRequestDialogActive = false
-        doRequestPermission()
+
+        when (isAccepted) {
+            true -> {
+                doRequestPermission() //XXX REMOVE
+                locationPreconditionsChecker.onRationaleResult(true)
+            }
+
+            false -> {
+                onPermissionsRejected() //XXX REMOVE
+                locationPreconditionsChecker.onRationaleResult(false)
+            }
+        }
     }
 
-    override fun onRationaleRejected() {
-        Log.d(TAG, "... onRationaleRejected")
-        isPermissionRequestDialogActive = false
-        onPermissionsRejected()
-    }
-
-    private fun doRequestPermission() {
+    override fun doRequestPermission() {
         Log.d(TAG, "... doRequestPermission")
         isPermissionRequestDialogActive = true
         requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_PERMISSION_LOCATION)
@@ -203,16 +226,25 @@ class MainActivity : AppCompatActivity(),
             return
         }
 
-        val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
-        when (checkResult) {
-            ConnectionResult.SUCCESS -> {
-                onGooglePlayServicesCheckSuccess()
+        when (isGooglePlayServicesReady) {
+            null -> {
+                val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
+                when (checkResult) {
+                    ConnectionResult.SUCCESS -> {
+                        isGooglePlayServicesReady = true
+                        onGooglePlayServicesCheckSuccess()
+                    }
+
+                    else -> {
+                        isGooglePlayServicesResolutionInProgress = true
+                        HandleGooglePlayServicesErrorDialog.show(supportFragmentManager, checkResult, REQ_GOOGLE_PLAY_SERVICES_RESOLVE)
+                    }
+                }
             }
 
-            else -> {
-                isGooglePlayServicesResolutionInProgress = true
-                HandleGooglePlayServicesErrorDialog.show(supportFragmentManager, checkResult, REQ_GOOGLE_PLAY_SERVICES_RESOLVE)
-            }
+            false -> { onGooglePlayServicesCheckFail() }
+
+            true -> {}
         }
     }
 
@@ -275,8 +307,7 @@ class PermissionDialogFragment : DialogFragment() {
     }
 
     interface PermissionRationaleDialogListener {
-        fun onRationaleAccepted()
-        fun onRationaleRejected()
+        fun onRationaleResult(isAccepted : Boolean)
     }
 
     lateinit var listener: PermissionRationaleDialogListener
@@ -295,8 +326,8 @@ class PermissionDialogFragment : DialogFragment() {
                 .content(message)
                 .positiveText("ОК")
                 .negativeText("Отказаться")
-                .onPositive { materialDialog, dialogAction -> listener.onRationaleAccepted() }
-                .onNegative { materialDialog, dialogAction -> listener.onRationaleRejected() }
+                .onPositive { materialDialog, dialogAction -> listener.onRationaleResult(true) }
+                .onNegative { materialDialog, dialogAction -> listener.onRationaleResult(false) }
                 .show()
     }
 }
