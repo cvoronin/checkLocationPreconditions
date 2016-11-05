@@ -1,12 +1,18 @@
 package ru.cvoronin.checkgeoprerequests
 
 import android.Manifest
+import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Address
+import android.location.Geocoder
+import android.location.Location
 import android.os.Bundle
+import android.os.Handler
+import android.os.Message
 import android.support.v4.app.ActivityCompat
 import android.support.v4.app.DialogFragment
 import android.support.v4.app.FragmentManager
@@ -21,117 +27,145 @@ import com.google.android.gms.common.api.GoogleApiClient
 import com.google.android.gms.common.api.PendingResult
 import com.google.android.gms.location.*
 import org.jetbrains.anko.doAsync
-import java.util.concurrent.TimeUnit
+import org.jetbrains.anko.uiThread
+import java.lang.ref.WeakReference
+import java.util.*
 
-class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
+class MainActivity : AppCompatActivity(),
         PermissionDialogFragment.PermissionRationaleDialogListener,
-        HandleGooglePlayServicesErrorDialog.GooglePlayServicesResolutionDialogListener {
+        GoogleErrorDialog.GoogleErrorDialogListener {
 
     companion object {
-        var TAG = "MainActivity"
-        val LOCATION_PERMISSION_RATIONALE = "Location permission is... "
-
-        val KEY_IS_PERMISSION_GRANTED = "isPermissionGranted"
-        val KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE = "isPermissionRequestDialogActive"
-
-        val KEY_GOOGLE_PLAY_SERVICES_READY = "isGooglePlayServicesReady"
-        val KEY_GOOGLE_PLAY_SERVICES_RESOLVING = "isGooglePlayServicesResolving"
-
+        val LOCATION_PERMISSION_RATIONALE_TEXT = "Location permission is... "
         val REQ_PERMISSION_LOCATION = 100
         val REQ_GOOGLE_PLAY_SERVICES_RESOLVE = 101
+        val REQ_RESOLVE_SETTINGS_ERROR = 102
+        var REQ_RESOLVE_CONNECTION_FAILED_ERROR = 103
+
+        val KEY_IS_PERMISSION_GRANTED = "isPermissionGranted"
+        val KEY_IS_RESOLVING = "isResolving"
+        val KEY_IS_GEO_FUNCTIONS_ENABLED = "isGeoFunctionsEnabled"
+        val KEY_IS_LOCATION_SEARCH_IN_PROGRESS = "isLocationSearchInProgress"
+        val KEY_LOCATION = "location"
     }
 
-//    lateinit var locationPreconditionsChecker : LocationPreconditionsChecker
+    var TAG = "MainActivity @${Integer.toHexString(hashCode())}"
+
+    private var isResolving = false
+    private var isPermissionGranted: Boolean? = null
+    private var isGeoFunctionsEnabled: Boolean = false
+    private var isLocationSearchInProgress: Boolean = false
+
+    // This value is not stored in saveInstanceState
+    private var isViewInitialized: Boolean = false
+
+    private var location: Location? = null
+
+    lateinit private var apiClient: GoogleApiClient
+    lateinit private var locationRequest: LocationRequest
 
     //............................................................................................
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        Log.d(TAG, "... onCreate")
+
         setContentView(R.layout.activity_main)
 
         if (savedInstanceState != null) {
             with(savedInstanceState) {
                 isPermissionGranted = getBoolean(KEY_IS_PERMISSION_GRANTED)
-                isPermissionRequestDialogActive = getBoolean(KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE)
-
-                isGooglePlayServicesReady = getBoolean(KEY_GOOGLE_PLAY_SERVICES_READY)
-                isGooglePlayServicesResolutionInProgress = getBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING)
+                isResolving = getBoolean(KEY_IS_RESOLVING)
+                isGeoFunctionsEnabled = getBoolean(KEY_IS_GEO_FUNCTIONS_ENABLED)
+                isLocationSearchInProgress = getBoolean(KEY_IS_LOCATION_SEARCH_IN_PROGRESS)
+                location = getParcelable(KEY_LOCATION)
             }
         }
 
-//        locationPreconditionsChecker = LocationPreconditionsCheckerImpl(this, savedInstanceState)
+        apiClient = GoogleApiClient.Builder(this)
+                .addApi(LocationServices.API)
+                .addConnectionCallbacks(connectionCallbacks)
+                .addOnConnectionFailedListener(connectionFailedListener)
+                .build()
+
+        locationRequest = LocationRequest().apply {
+            interval = 1000
+            fastestInterval = 1000
+            priority = LocationRequest.PRIORITY_HIGH_ACCURACY
+        }
     }
 
     override fun onResume() {
         Log.d(TAG, "... onResume")
         super.onResume()
 
-//        locationPreconditionsChecker.check()
+        if (isResolving) return
 
-        /* Check if permission is granted or if request permission dialog is active */
-        if (isPermissionRequestDialogActive || isGooglePlayServicesResolutionInProgress) {
-            // Dialog is active, do nothing, waiting for result
+        if (isPermissionGranted == null) {
+            doCheckPermissions()
             return
         }
 
-        when (isPermissionGranted) {
-            null -> {
-                doCheckPermissions()
-                return
-            }
-
-            false -> {
-                onPermissionsRejected()
-                return
-            }
-
-            true -> {
-            }
+        if (isLocationSearchInProgress) {
+            findLocation()
+            return
         }
 
-        /* OK, Permission is granted, check Google Play Services version */
-
-        if (isGooglePlayServicesReady == null) {
-            doCheckGooglePlayServices()
+        if (!isViewInitialized) {
+            initView()
         }
 
-
+        //presenter.onResume
     }
 
     override fun onPause() {
         Log.d(TAG, "... onPause")
+
+        if (apiClient.isConnected) {
+            stopLocationUpdates()
+        }
+
         super.onPause()
     }
 
-    override fun onSaveInstanceState(outState: Bundle?) {
-        super.onSaveInstanceState(outState)
-        with(outState!!) {
+    override fun onStart() {
+        super.onStart()
 
-            if (isPermissionGranted != null) putBoolean(KEY_IS_PERMISSION_GRANTED, isPermissionGranted!!)
-
-            putBoolean(KEY_PERMISSION_REQUEST_DIALOG_IS_ACTIVE, isPermissionRequestDialogActive)
-
-            if (isGooglePlayServicesReady != null) {
-                putBoolean(KEY_GOOGLE_PLAY_SERVICES_READY, isGooglePlayServicesReady!!)
-            }
-
-            putBoolean(KEY_GOOGLE_PLAY_SERVICES_RESOLVING, isGooglePlayServicesResolutionInProgress)
+        if (isGeoFunctionsEnabled) {
+            apiClient.connect()
         }
     }
 
-    //.............................................................................................
+    override fun onStop() {
+        if (apiClient.isConnected) {
+            apiClient.disconnect()
+        }
 
-    override fun onLocationPreconditionsCheckCompleted(checkResult: LocationPreconditionsChecker.CheckResult) {
-
+        super.onStop()
     }
 
-    //... Методы быстрой проверки .................................................................
+    override fun onSaveInstanceState(outState: Bundle?) {
+        Log.d(TAG, "... onSaveInstanceState")
 
-    /*
-        Иногда достаточно только их - в случаях, когда не требуется
-        выполнять полный анализ, запрос разрешений, обновление устаревших версий и т. п. -
-        когда возможность получить текущие координаты либо есть, либо нет.
-     */
+        super.onSaveInstanceState(outState)
+        with(outState!!) {
+            if (isPermissionGranted != null) putBoolean(KEY_IS_PERMISSION_GRANTED, isPermissionGranted!!)
+            putBoolean(KEY_IS_RESOLVING, isResolving)
+            putBoolean(KEY_IS_GEO_FUNCTIONS_ENABLED, isGeoFunctionsEnabled)
+            putBoolean(KEY_IS_LOCATION_SEARCH_IN_PROGRESS, isLocationSearchInProgress)
+            putParcelable(KEY_LOCATION, location)
+        }
+    }
+
+    private fun initView() {
+        println("... initView $isGeoFunctionsEnabled $location")
+
+        // create presenter, inject etc
+        isViewInitialized = true
+    }
+
+    //... Quick Check Methods .................................................................
 
     fun isGeoLocationPermissionGranted(): Boolean = ContextCompat.checkSelfPermission(this,
             Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -139,11 +173,9 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
     fun isGooglePlayServicesAvailable(): Boolean =
             GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) == ConnectionResult.SUCCESS
 
-    //... CHECK LOCATION PERMISSION SECTION .......................................................
 
-    // Until check is completed value is nor true, nor false
-    private var isPermissionGranted: Boolean? = null
-    private var isPermissionRequestDialogActive: Boolean = false
+
+    //...  CHECK PERMISSION .......................................................................
 
     private fun doCheckPermissions() {
         when (isGeoLocationPermissionGranted()) {
@@ -159,57 +191,29 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         }
     }
 
-    override fun doShowPermissionRationale() {
-        Log.d(TAG, "... doShowPermissionRationale")
-        isPermissionRequestDialogActive = true
-        PermissionDialogFragment.show(supportFragmentManager, LOCATION_PERMISSION_RATIONALE)
+    private fun doShowPermissionRationale() {
+        isResolving = true
+        PermissionDialogFragment.show(supportFragmentManager, LOCATION_PERMISSION_RATIONALE_TEXT)
     }
 
     override fun onRationaleResult(isAccepted: Boolean) {
-        Log.d(TAG, "... onRationaleResult: $isAccepted")
-        isPermissionRequestDialogActive = false
-
+        isResolving = false
         when (isAccepted) {
-            true -> {
-                doRequestPermission() //XXX REMOVE
-//                locationPreconditionsChecker.onRationaleResult(true)
-            }
-
-            false -> {
-                onPermissionsRejected() //XXX REMOVE
-//                locationPreconditionsChecker.onRationaleResult(false)
-            }
+            true -> doRequestPermission()
+            false -> onPermissionsRejected()
         }
     }
 
-    override fun doRequestPermission() {
-        Log.d(TAG, "... doRequestPermission")
-        isPermissionRequestDialogActive = true
+    private fun doRequestPermission() {
+        isResolving = true
         requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_PERMISSION_LOCATION)
     }
 
-    private fun onPermissionsGranted() {
-        Log.d(TAG, "... onPermissionsGranted")
-        Toast.makeText(this, "PERMISSION GRANTED", Toast.LENGTH_SHORT).show()
-        isPermissionGranted = true
-
-        doCheckGooglePlayServices()
-    }
-
-    private fun onPermissionsRejected() {
-        Log.d(TAG, "... onPermissionsRejected")
-        Toast.makeText(this, "PERMISSION REJECTED", Toast.LENGTH_SHORT).show()
-        isPermissionGranted = false
-    }
-
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        Log.d(TAG, "... onRequestPermissionsResult")
-
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == REQ_PERMISSION_LOCATION) {
-            isPermissionRequestDialogActive = false
-
+            isResolving = false
             when (permissions.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 true -> onPermissionsGranted()
                 else -> onPermissionsRejected()
@@ -217,71 +221,98 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         }
     }
 
-    //... CHECK GOOGLE PLAY SERVICES SECTION ......................................................
+    private fun onPermissionsGranted() {
+        Log.d(TAG, "... onPermissionsGranted")
+        Toast.makeText(this, "PERMISSION GRANTED", Toast.LENGTH_SHORT).show()
 
+        isPermissionGranted = true
+        apiClient.connect()
+    }
 
-    private var isGooglePlayServicesReady: Boolean? = null
-    private var isGooglePlayServicesResolutionInProgress = false
+    private fun onPermissionsRejected() {
+        Toast.makeText(this, "PERMISSION REJECTED", Toast.LENGTH_SHORT).show()
+        isPermissionGranted = false
+        isGeoFunctionsEnabled = false
+        initView()
+    }
 
-    fun doCheckGooglePlayServices() {
-        Log.d(TAG, "... doCheckGooglePlayServices")
+    //... CHECK GOOGLE PLAY SERVICES ..............................................................
 
-        if (isGooglePlayServicesResolutionInProgress) {
-            Log.d(TAG, "... ... resolution is in progress, do nothing")
-            return
+    private val connectionCallbacks = object : GoogleApiClient.ConnectionCallbacks {
+        override fun onConnected(p0: Bundle?) {
+            Log.d(TAG, "... ConnectionCallbacks/onConnected")
+            checkSettings()
         }
 
-        when (isGooglePlayServicesReady) {
-            null -> {
-                val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
-                when (checkResult) {
-                    ConnectionResult.SUCCESS -> {
-                        isGooglePlayServicesReady = true
-                        onGooglePlayServicesCheckSuccess()
-                    }
+        override fun onConnectionSuspended(p0: Int) {
+            Log.d(TAG, "... ConnectionCallbacks/onConnectionSuspended")
+        }
+    }
 
-                    else -> {
-                        isGooglePlayServicesResolutionInProgress = true
-                        HandleGooglePlayServicesErrorDialog.show(supportFragmentManager, checkResult, REQ_GOOGLE_PLAY_SERVICES_RESOLVE)
+    private val connectionFailedListener = GoogleApiClient.OnConnectionFailedListener { connectionResult ->
+        Log.d(TAG, "!!! OnConnectionFailedListener/onConnectionFailed $connectionResult")
+
+        if (isResolving) {
+            return@OnConnectionFailedListener
+        }
+
+        when (connectionResult.hasResolution()) {
+            true -> {
+                isResolving = true
+                connectionResult.startResolutionForResult(this, REQ_RESOLVE_CONNECTION_FAILED_ERROR)
+            }
+
+            else -> {
+                isResolving = true
+                GoogleErrorDialog.show(supportFragmentManager, connectionResult.errorCode, REQ_RESOLVE_CONNECTION_FAILED_ERROR)
+            }
+        }
+    }
+
+
+
+    //... CHECK SETTINGS ..........................................................................
+
+    private fun checkSettings() {
+
+        val builder = LocationSettingsRequest.Builder().addLocationRequest(locationRequest)
+        val resultPending: PendingResult<LocationSettingsResult> =
+                LocationServices.SettingsApi.checkLocationSettings(apiClient, builder.build())
+
+        resultPending.setResultCallback { result ->
+            println("... LocationSettingsRequest: ${result.status.statusMessage}")
+
+            when (result.status.statusCode) {
+                LocationSettingsStatusCodes.SUCCESS -> {
+                    Log.d(TAG, "... LocationSettingsStatusCodes/SUCCESS")
+                    onLocationSettingsSuccess()
+                }
+
+                LocationSettingsStatusCodes.RESOLUTION_REQUIRED -> {
+                    Log.d(TAG, "... LocationSettingsStatusCodes/RESOLUTION_REQUIRED")
+
+                    try {
+                        isResolving = true
+                        result.status.startResolutionForResult(this@MainActivity, REQ_RESOLVE_SETTINGS_ERROR)
+                    } catch (e: Exception) {
+                        Log.e(TAG, Log.getStackTraceString(e))
+
+                        isGeoFunctionsEnabled = false
+                        initView()
                     }
                 }
-            }
 
-            false -> {
-                onGooglePlayServicesCheckFail()
-            }
+                LocationSettingsStatusCodes.SETTINGS_CHANGE_UNAVAILABLE -> {
+                    Log.d(TAG, "... LocationSettingsStatusCodes/SETTINGS_CHANGE_UNAVAILABLE")
 
-            true -> {
+                    isGeoFunctionsEnabled = false
+                    initView()
+                }
             }
         }
     }
 
-    private fun onGooglePlayServicesCheckSuccess() {
-        Log.d(TAG, "... onGooglePlayServicesCheckSuccess")
-        isGooglePlayServicesReady = true
-        isGooglePlayServicesResolutionInProgress = false
 
-        initGoogleApiClient()
-    }
-
-    private fun onGooglePlayServicesCheckFail() {
-        Log.d(TAG, "... onGooglePlayServicesCheckFail")
-        isGooglePlayServicesReady = false
-        isGooglePlayServicesResolutionInProgress = false
-    }
-
-    override fun onGooglePlayServicesResolutionDialogDismissed() {
-        Log.d(TAG, "... onResolutionDialogDismissed")
-
-        isGooglePlayServicesResolutionInProgress = false
-
-        // Check if problem was fixed
-        val checkResult = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this)
-        when (checkResult) {
-            ConnectionResult.SUCCESS -> onGooglePlayServicesCheckSuccess()
-            else -> onGooglePlayServicesCheckFail()
-        }
-    }
 
     //.............................................................................................
 
@@ -291,61 +322,173 @@ class MainActivity : AppCompatActivity(), LocationPreconditionsCheckActivity,
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == REQ_GOOGLE_PLAY_SERVICES_RESOLVE) {
-            onGooglePlayServicesResolutionDialogDismissed()
+            onGoogleErrorDialogDismissed()
             return
         }
+
+        if (requestCode == REQ_RESOLVE_CONNECTION_FAILED_ERROR) {
+            isResolving = false
+            if (resultCode == Activity.RESULT_OK) {
+                if (!apiClient.isConnected && !apiClient.isConnecting) {
+                    apiClient.connect()
+                }
+            } else {
+                isGeoFunctionsEnabled = false
+                initView()
+            }
+        }
+
+        if (requestCode == REQ_RESOLVE_SETTINGS_ERROR) {
+            if (requestCode == Activity.RESULT_OK) {
+                onLocationSettingsSuccess()
+            } else {
+                isGeoFunctionsEnabled = false
+                initView()
+            }
+        }
     }
+
+    override fun onGoogleErrorDialogDismissed() {
+        /*
+            When activity is recreated, this method of is called for "old" activity
+            after the old#saveInstatnceState and new@onCreate are called
+         */
+
+        Log.d(TAG, "... onResolutionDialogDismissed")
+        isResolving = false
+
+        if (isResolving) {
+            isResolving = false
+            isGeoFunctionsEnabled = false
+            initView()
+        }
+    }
+
+
 
     //.............................................................................................
 
-    //... ИНИЦИАЛИЗАЦИЯ КЛИЕНТА ...................................................................
+    private fun onLocationSettingsSuccess() {
+        Log.d(TAG, "... onLocationSettingsSuccess")
 
-    private lateinit var apiClient: GoogleApiClient
+        when (this.location) {
+            null -> {
+                isGeoFunctionsEnabled = true
+                findLocation()
+            }
 
-    private val connectionCallbacks = object : GoogleApiClient.ConnectionCallbacks {
-        override fun onConnected(p0: Bundle?) {
-            Log.d(TAG, "... onConnected")
-        }
-
-        override fun onConnectionSuspended(p0: Int) {
-            Log.d(TAG, "... onConnectionSuspended")
+            else -> {
+                Log.d(TAG, "... ... location is $location, do nothing")
+            }
         }
     }
 
-    private val connectionFailedListener = GoogleApiClient.OnConnectionFailedListener { Log.d(TAG, "!!! onConnectionFailed") }
+    private fun findLocation() {
+        Log.d(TAG, "... findLocation")
 
-    private fun createLocationRequest() = LocationRequest().apply {
-        interval = 2000
-        fastestInterval = 1000
-        priority = LocationRequest.PRIORITY_HIGH_ACCURACY
+        isLocationSearchInProgress = true
+        locationTimeoutHandler.sendEmptyMessageDelayed(0, 30 * 1000)
+
+        val lastKnownLocation = LocationServices.FusedLocationApi.getLastLocation(apiClient)
+        println("... lastKnowLocation: $lastKnownLocation")
+
+        location = lastKnownLocation
+        LocationServices.FusedLocationApi.requestLocationUpdates(apiClient, locationRequest, locationListener)
     }
 
-    private fun initGoogleApiClient() {
-        Log.d(TAG, "... initGoogleApiClient")
+    private fun stopLocationUpdates() {
 
-        apiClient = GoogleApiClient.Builder(this)
-                .addApi(LocationServices.API)
-                .addConnectionCallbacks(connectionCallbacks)
-                .addOnConnectionFailedListener(connectionFailedListener)
-                .build()
+        Log.d(TAG, "... stopLocationUpdates")
 
-        val builder = LocationSettingsRequest.Builder().addLocationRequest(createLocationRequest())
+        // Do not change value here - it should be changed only when location is found - or in
+        // case of location search timeout
+        // isLocationSearchInProgress = false
 
-        val resultPending: PendingResult<LocationSettingsResult> =
-                LocationServices.SettingsApi.checkLocationSettings(apiClient, builder.build())
+        locationTimeoutHandler.removeMessages(0)
+        LocationServices.FusedLocationApi.removeLocationUpdates(apiClient, locationListener)
+    }
 
-        resultPending.setResultCallback { result ->
+    private fun onFindLocationTimedOut() {
+        Log.d(TAG, "... onFindLocationTimedOut")
+        stopLocationUpdates()
 
-            Log.d(TAG, "... onResultCallback")
+        location = null
 
-            val status = result.status
-            val states : LocationSettingsStates = result.locationSettingsStates
+        isLocationSearchInProgress = false
+        isGeoFunctionsEnabled = false
+        initView()
+    }
 
-            Log.d(TAG, "... ... status $status")
-
+    val locationListener: LocationListener = LocationListener { aLocation ->
+        if (this.location == null) {
+            this.location = aLocation
+            return@LocationListener
         }
 
-        apiClient.connect()
+        val prevLocation = this.location!!
+        this.location = aLocation
+        val distanceResults = FloatArray(1)
+        Location.distanceBetween(prevLocation.latitude, prevLocation.longitude,
+                aLocation.latitude, aLocation.longitude, distanceResults)
+
+        if (distanceResults[0] < 30) {
+            stopLocationUpdates()
+            onLocationFound()
+        }
+    }
+
+    private fun onLocationFound() {
+        locationTimeoutHandler.removeMessages(0)
+
+        isLocationSearchInProgress = false
+        isGeoFunctionsEnabled = true
+        initView()
+
+        // Just for fun
+        findAddress(this.location!!)
+    }
+
+    private fun findAddress(location : Location) {
+        val geoCoder = Geocoder(this, Locale.getDefault())
+
+        doAsync {
+            val result : List<Address> = try {
+                geoCoder.getFromLocation(location.latitude, location.longitude, 1)
+            } catch (e : Exception) {
+                Log.e(TAG, Log.getStackTraceString(e))
+                emptyList()
+            }
+
+            uiThread {
+                println("... Geocoder results for $location")
+                result.forEach { address ->
+                    println("... countryCode: ${address.countryCode}")
+                    println("... countryName: ${address.countryName}")
+                    for (i in 0..address.maxAddressLineIndex) {
+                        println("... ... ${address.getAddressLine(i)}")
+                    }
+                    println("")
+                }
+            }
+        }
+    }
+
+
+    //.............................................................................................
+
+    val locationTimeoutHandler = LocationTimeoutHandler(this)
+
+    class LocationTimeoutHandler(activity: MainActivity) : Handler() {
+
+        val activityRef: WeakReference<MainActivity>
+
+        init {
+            activityRef = WeakReference(activity)
+        }
+
+        override fun handleMessage(msg: Message?) {
+            activityRef.get()?.onFindLocationTimedOut()
+        }
     }
 }
 
@@ -397,10 +540,10 @@ class PermissionDialogFragment : DialogFragment() {
 
 //.................................................................................................
 
-class HandleGooglePlayServicesErrorDialog : DialogFragment() {
+class GoogleErrorDialog : DialogFragment() {
 
-    interface GooglePlayServicesResolutionDialogListener {
-        fun onGooglePlayServicesResolutionDialogDismissed()
+    interface GoogleErrorDialogListener {
+        fun onGoogleErrorDialogDismissed()
     }
 
     companion object {
@@ -409,7 +552,7 @@ class HandleGooglePlayServicesErrorDialog : DialogFragment() {
         val KEY_REQ_CODE = "requestCode"
 
         fun show(fragmentManager: FragmentManager, errorCode: Int, requestCode: Int) {
-            val fragment = HandleGooglePlayServicesErrorDialog()
+            val fragment = GoogleErrorDialog()
 
             fragment.arguments = Bundle().apply {
                 putInt(KEY_ERROR_CODE, errorCode)
@@ -420,11 +563,11 @@ class HandleGooglePlayServicesErrorDialog : DialogFragment() {
         }
     }
 
-    lateinit private var listener: GooglePlayServicesResolutionDialogListener
+    lateinit private var listener: GoogleErrorDialogListener
 
     override fun onAttach(context: Context?) {
         super.onAttach(context)
-        listener = activity as GooglePlayServicesResolutionDialogListener
+        listener = activity as GoogleErrorDialogListener
     }
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
@@ -435,7 +578,7 @@ class HandleGooglePlayServicesErrorDialog : DialogFragment() {
     }
 
     override fun onDismiss(dialog: DialogInterface?) {
-        listener.onGooglePlayServicesResolutionDialogDismissed()
+        listener.onGoogleErrorDialogDismissed()
     }
 }
 
