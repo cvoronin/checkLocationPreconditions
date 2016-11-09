@@ -38,7 +38,6 @@ class MainActivity : AppCompatActivity(),
     companion object {
         val LOCATION_PERMISSION_RATIONALE_TEXT = "Location permission is... "
         val REQ_PERMISSION_LOCATION = 100
-        val REQ_GOOGLE_PLAY_SERVICES_RESOLVE = 101
         val REQ_RESOLVE_SETTINGS_ERROR = 102
         var REQ_RESOLVE_CONNECTION_FAILED_ERROR = 103
 
@@ -321,12 +320,7 @@ class MainActivity : AppCompatActivity(),
 
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (requestCode == REQ_GOOGLE_PLAY_SERVICES_RESOLVE) {
-            onGoogleErrorDialogDismissed()
-            return
-        }
-
-        if (requestCode == REQ_RESOLVE_CONNECTION_FAILED_ERROR) {
+         if (requestCode == REQ_RESOLVE_CONNECTION_FAILED_ERROR) {
             isResolving = false
             if (resultCode == Activity.RESULT_OK) {
                 if (!apiClient.isConnected && !apiClient.isConnecting) {
@@ -339,7 +333,7 @@ class MainActivity : AppCompatActivity(),
         }
 
         if (requestCode == REQ_RESOLVE_SETTINGS_ERROR) {
-            if (requestCode == Activity.RESULT_OK) {
+            if (resultCode == Activity.RESULT_OK) {
                 onLocationSettingsSuccess()
             } else {
                 isGeoFunctionsEnabled = false
